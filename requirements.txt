@@ -1,0 +1,36 @@
+# D4RT Requirements
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+timm>=0.9.0  # For pretrained ViT weights
+transformers>=4.30.0  # For VideoMAE pretrained weights
+
+# Data processing
+Pillow>=9.0.0
+opencv-python>=4.7.0
+imageio>=2.25.0
+
+# Configuration and utilities
+PyYAML>=6.0
+tqdm>=4.64.0
+
+# Visualization
+matplotlib>=3.6.0
+
+# Testing
+pytest>=7.0.0
+
+# Optional: for faster attention (FlashAttention)
+# flash-attn>=2.0.0  # Requires CUDA, auto-used by PyTorch when available
+
+# Optional: for optimized Umeyama alignment (GPU-accelerated, batched)
+# pytorch3d>=0.7.0  # pip install pytorch3d or from source for CUDA support
+
+# Optional: for distributed training
+# tensorboard>=2.12.0
+
+# Optional: for point cloud visualization
+# open3d>=0.17.0
+# trimesh>=3.20.0

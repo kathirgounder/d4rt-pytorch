@@ -1,0 +1,91 @@
+# D4RT Configuration for Azure A100 VMs
+# Optimized for Standard_NC24ads_A100_v4 (1x A100 80GB) or ND96asr_v4 (8x A100)
+#
+# VM Recommendations:
+#   - Standard_NC24ads_A100_v4: 1x A100 80GB, 24 vCPUs, 220GB RAM (~$3.67/hr)
+#   - Standard_ND96asr_v4: 8x A100 40GB, 96 vCPUs, 900GB RAM (~$27.20/hr)
+#   - Standard_ND96amsr_A100_v4: 8x A100 80GB, 96 vCPUs, 1.9TB RAM (~$32.77/hr)
+#
+# Training time estimates (to 500k steps):
+#   - 1x A100 80GB: ~7 days (batch=4, accum=16)
+#   - 8x A100 80GB: ~21 hours (batch=4, accum=2)
+#   - 64x A100 (8 nodes): ~3 hours (paper setup)
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+encoder: large  # ViT-L for good quality/speed tradeoff
+decoder_depth: 8
+img_size: 256
+num_frames: 48
+patch_size: 9
+
+# =============================================================================
+# Training Configuration - Single A100 80GB
+# =============================================================================
+# Effective batch size = batch_size * accum_steps * num_gpus
+# Paper uses effective batch = 64
+# Single A100: 4 * 16 * 1 = 64
+batch_size: 4
+gradient_accumulation_steps: 16
+num_queries: 2048
+
+# Training schedule
+steps: 500000
+lr: 1.0e-4
+min_lr: 1.0e-6
+warmup_steps: 2500
+weight_decay: 0.03
+grad_clip: 10.0
+
+# A100 can handle larger batches without aggressive memory optimization
+amp: true
+gradient_checkpointing: false
+compile: true  # torch.compile gives ~20% speedup on A100
+
+# =============================================================================
+# Loss Weights
+# =============================================================================
+lambda_3d: 1.0
+lambda_2d: 0.1
+lambda_vis: 0.1
+lambda_disp: 0.1
+lambda_normal: 0.5
+lambda_conf: 0.2
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+dataset: kubric
+num_workers: 16  # A100 VMs have many CPU cores
+
+# =============================================================================
+# Checkpointing
+# =============================================================================
+save_freq: 5000
+log_freq: 50
+auto_resume: true
+
+# =============================================================================
+# Random Seed
+# =============================================================================
+seed: 42
+
+# =============================================================================
+# Alternative Configurations
+# =============================================================================
+
+# --- For 8x A100 (ND96 series) ---
+# batch_size: 4
+# gradient_accumulation_steps: 2  # 4 * 2 * 8 = 64
+
+# --- For multi-node (e.g., 4 nodes x 8 GPUs = 32 GPUs) ---
+# batch_size: 4
+# gradient_accumulation_steps: 1  # 4 * 1 * 32 = 128 (slightly larger)
+# lr: 1.4e-4  # Scale LR with sqrt(batch_size_ratio)
+
+# --- For ViT-Giant (paper's full model, requires 80GB) ---
+# encoder: giant
+# batch_size: 2
+# gradient_accumulation_steps: 32
+# gradient_checkpointing: true

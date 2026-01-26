@@ -1,0 +1,78 @@
+# D4RT Configuration for RTX 5090 (32GB VRAM)
+# Optimized for single high-end GPU training with gradient accumulation
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+encoder: large  # ViT-L with VideoMAE pretrained weights (305M params)
+decoder_depth: 8
+img_size: 256
+num_frames: 48
+patch_size: 9  # Local RGB patch size (critical for performance)
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+# Memory-optimized settings for 32GB VRAM
+batch_size: 2  # Per-GPU batch size (fits with AMP)
+gradient_accumulation_steps: 32  # Effective batch = 2 * 32 = 64 (matches paper)
+num_queries: 2048
+
+# Training schedule (matching paper)
+steps: 500000
+lr: 1.0e-4
+min_lr: 1.0e-6
+warmup_steps: 2500
+weight_decay: 0.03
+grad_clip: 10.0
+
+# Memory optimizations (essential for RTX 5090)
+amp: true  # Mixed precision - reduces memory by ~40%
+gradient_checkpointing: false  # Enable if OOM (trades compute for memory)
+compile: false  # torch.compile - enable for ~15% speedup after warmup
+
+# =============================================================================
+# Loss Weights (from paper)
+# =============================================================================
+lambda_3d: 1.0
+lambda_2d: 0.1
+lambda_vis: 0.1
+lambda_disp: 0.1
+lambda_normal: 0.5
+lambda_conf: 0.2
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+dataset: kubric
+num_workers: 8  # RTX 5090 systems typically have fast CPUs
+
+# =============================================================================
+# Checkpointing
+# =============================================================================
+save_freq: 5000  # Save every 5k steps
+log_freq: 50  # Log every 50 steps
+auto_resume: true  # Automatically resume from checkpoint_latest.pth
+
+# =============================================================================
+# Random Seed
+# =============================================================================
+seed: 42
+
+# =============================================================================
+# Alternative Configurations (uncomment as needed)
+# =============================================================================
+
+# --- If running out of memory (reduce batch_size, increase accumulation) ---
+# batch_size: 1
+# gradient_accumulation_steps: 64
+# gradient_checkpointing: true
+
+# --- For faster iteration (smaller effective batch) ---
+# batch_size: 2
+# gradient_accumulation_steps: 8  # Effective batch = 16
+# lr: 5.0e-5  # Scale down LR for smaller batch
+
+# --- For multi-GPU training (e.g., 2x RTX 5090) ---
+# batch_size: 2
+# gradient_accumulation_steps: 16  # Effective batch = 2 * 16 * 2 = 64

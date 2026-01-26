@@ -1,0 +1,161 @@
+# =============================================================================
+# D4RT .gitignore
+# =============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.env.*
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# =============================================================================
+# IDE
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =============================================================================
+# Project specific
+# =============================================================================
+
+# Training outputs
+outputs/
+checkpoints/
+logs/
+runs/
+tensorboard/
+wandb/
+
+# Data directories
+data/
+datasets/
+*.tar.gz
+*.tar
+*.zip
+
+# Model weights (large files)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.bin
+
+# Logs
+*.log
+d4rt_transfer_errors.log
+
+# Temporary files
+tmp/
+temp/
+/tmp/
+*.tmp
+
+# Claude Code settings (local)
+.claude/
+
+# Secrets (should use environment variables)
+secrets.yaml
+secrets.json
+.secrets
+*.key
+*.pem
+
+# Azure/Cloud credentials
+azure.json
+credentials.json
+service_account.json
