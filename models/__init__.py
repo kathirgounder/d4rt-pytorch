@@ -1,4 +1,4 @@
-from .d4rt import D4RT
+from .d4rt import D4RT, create_d4rt
 from .encoder import D4RTEncoder, create_encoder, VIDEOMAE_AVAILABLE
 from .decoder import D4RTDecoder
 from .embeddings import FourierEmbedding, PatchEmbedding, TimestepEmbedding
@@ -12,6 +12,7 @@ else:
 
 __all__ = [
     'D4RT',
+    'create_d4rt',
     'D4RTEncoder',
     'D4RTDecoder',
     'FourierEmbedding',

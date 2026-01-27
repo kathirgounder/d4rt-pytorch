@@ -1,0 +1,44 @@
+# D4RT Test Configuration
+# Minimal config for quick local testing before scaling up
+# Uses reduced settings to fit on consumer GPUs (8-16GB VRAM)
+
+# Model Configuration (small for testing)
+encoder: base
+decoder_depth: 4  # Reduced from 6
+img_size: 224     # VideoMAE requires 224x224 minimum
+num_frames: 16    # Must be divisible by 2 (VideoMAE temporal patch size)
+patch_size: 9
+
+# Training Configuration
+batch_size: 1
+gradient_accumulation_steps: 1
+num_queries: 512  # Reduced from 2048
+steps: 1000       # Short test run
+lr: 1.0e-4
+min_lr: 1.0e-6
+warmup_steps: 100
+weight_decay: 0.03
+grad_clip: 10.0
+amp: true         # Use mixed precision to save memory
+
+# Memory optimization
+gradient_checkpointing: true
+
+# Loss Weights
+lambda_3d: 1.0
+lambda_2d: 0.1
+lambda_vis: 0.1
+lambda_disp: 0.1
+lambda_normal: 0.5
+lambda_conf: 0.2
+
+# Data Configuration
+dataset: kubric
+num_workers: 0  # Set to 0 to avoid multiprocessing issues; increase if stable
+
+# Checkpointing
+save_freq: 500
+log_freq: 10
+
+# Random Seed
+seed: 42
