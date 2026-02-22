@@ -51,11 +51,18 @@ Sections:
 6. **Point Cloud** — 3D scene reconstruction from video""")
 
 code("""\
-import sys, os, time, math
-os.chdir(os.path.join(os.path.dirname(os.getcwd()), '') if 'notebooks' in os.getcwd() else os.getcwd())
-if os.path.basename(os.getcwd()) == 'notebooks':
-    os.chdir('..')
-sys.path.insert(0, os.getcwd())
+import sys, os, time, math, pathlib
+
+# Find project root (directory containing 'models/' and 'data/')
+_nb_dir = pathlib.Path(globals().get('__vsc_ipynb_file__', __file__)).resolve().parent if '__file__' in dir() else pathlib.Path.cwd()
+_project_root = _nb_dir
+for _ in range(5):
+    if (_project_root / 'models').is_dir() and (_project_root / 'data').is_dir():
+        break
+    _project_root = _project_root.parent
+os.chdir(str(_project_root))
+sys.path.insert(0, str(_project_root))
+print(f'Project root: {_project_root}')
 
 import torch
 import torch.nn as nn
