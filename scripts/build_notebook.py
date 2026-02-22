@@ -504,33 +504,89 @@ def lr_lambda(step):
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-# Pre-generate diverse query batches.
-# Each call to po_ds[0] re-samples both temporal frames AND query positions,
-# so the model sees diverse (u,v) coordinates instead of memorizing a fixed set.
-print(f'Pre-generating {CFG["query_pool_size"]} diverse query batches...')
-query_pool = []
-video_for_eval = None
-depth_for_eval = None
-video_for_viz = None
+# --- Load & process sequence ONCE (replicating __getitem__ pipeline) ---
+# This avoids reloading images from disk for every query batch.
+print('Loading and processing sequence data...')
+_raw = po_ds._load_sequence(0)
+_video = torch.from_numpy(_raw['video']).float()
+_orig_h, _orig_w = _raw['original_size']
+
+_depth = torch.from_numpy(_raw['depth']).float() if _raw.get('depth') is not None else None
+_normals = torch.from_numpy(_raw['normals']).float() if _raw.get('normals') is not None else None
+_intrinsics = torch.from_numpy(_raw['intrinsics']).float() if _raw.get('intrinsics') is not None else None
+_extrinsics = torch.from_numpy(_raw['extrinsics']).float() if _raw.get('extrinsics') is not None else None
+_tracks_3d = torch.from_numpy(_raw['tracks_3d']).float() if _raw.get('tracks_3d') is not None else None
+_tracks_2d = torch.from_numpy(_raw['tracks_2d']).float() if _raw.get('tracks_2d') is not None else None
+_visibility = torch.from_numpy(_raw['visibility']).float() if _raw.get('visibility') is not None else None
+
+# Temporal subsampling (fixed for all queries — same video clip)
+_frame_idx = po_ds.temporal_sampler(_video.shape[0], po_ds.num_frames)
+_video = _video[_frame_idx]
+if _depth is not None: _depth = _depth[_frame_idx]
+if _normals is not None: _normals = _normals[_frame_idx]
+if _extrinsics is not None: _extrinsics = _extrinsics[_frame_idx]
+if _intrinsics is not None and _intrinsics.dim() == 3: _intrinsics = _intrinsics[_frame_idx]
+if _tracks_3d is not None: _tracks_3d = _tracks_3d[:, _frame_idx]
+if _tracks_2d is not None: _tracks_2d = _tracks_2d[:, _frame_idx]
+if _visibility is not None: _visibility = _visibility[:, _frame_idx]
+
+# Normalize + resize
+if _video.max() > 1.0:
+    _video = _video / 255.0
+_video, _depth, _normals = po_ds._resize_frames(_video, _depth, _normals)
+_H, _W = po_ds.img_size, po_ds.img_size
+_T = _video.shape[0]
+
+# Scale intrinsics for resize
+if _intrinsics is not None:
+    _sx, _sy = _W / _orig_w, _H / _orig_h
+    _intrinsics = _intrinsics.clone()
+    if _intrinsics.dim() == 2:
+        _intrinsics[0, 0] *= _sx; _intrinsics[0, 2] *= _sx
+        _intrinsics[1, 1] *= _sy; _intrinsics[1, 2] *= _sy
+    else:
+        _intrinsics[:, 0, 0] *= _sx; _intrinsics[:, 0, 2] *= _sx
+        _intrinsics[:, 1, 1] *= _sy; _intrinsics[:, 1, 2] *= _sy
+
+# Scale 2D tracks for resize
+if _tracks_2d is not None:
+    _tracks_2d = _tracks_2d.clone()
+    _tracks_2d[..., 0] *= (_W / _orig_w)
+    _tracks_2d[..., 1] *= (_H / _orig_h)
+
+# Aspect ratio
+_ar = torch.tensor([_orig_w / max(_orig_w, _orig_h), _orig_h / max(_orig_w, _orig_h)], dtype=torch.float32)
+
+# --- Shared tensors (same video for all queries) ---
+video_input = _video.unsqueeze(0).permute(0, 4, 1, 2, 3).to(device)  # (1, 3, T, H, W)
+ar_d = _ar.unsqueeze(0).to(device)                                     # (1, 2)
+
+# For eval/viz
+video_for_eval = _video.unsqueeze(0).to(device)   # (1, T, H, W, 3)
+depth_for_eval = _depth                             # (T, H, W) cpu
+video_for_viz = (_video * 255).byte()               # (T, H, W, 3) cpu uint8
+
+print(f'Video: {_video.shape}, Depth: {_depth.shape if _depth is not None else None}')
+
+# --- Generate diverse query batches (fast — no disk I/O, just random sampling) ---
+print(f'Generating {CFG["query_pool_size"]} diverse query batches...')
 t0_pool = time.time()
+query_pool = []
 for _i in range(CFG['query_pool_size']):
-    _s = po_ds[0]
-    _b = collate_fn([_s])
+    _coords, _t_src, _t_tgt, _t_cam, _targets = po_ds.query_sampler.sample(
+        _T, _H, _W, depth=_depth, tracks_3d=_tracks_3d, tracks_2d=_tracks_2d,
+        visibility=_visibility, intrinsics=_intrinsics, extrinsics=_extrinsics,
+        normals=_normals,
+    )
     query_pool.append({
-        'video_input': _b['video'].permute(0, 4, 1, 2, 3).to(device),
-        'coords': _b['coords'].to(device),
-        't_src': _b['t_src'].to(device),
-        't_tgt': _b['t_tgt'].to(device),
-        't_cam': _b['t_cam'].to(device),
-        'ar': _b['aspect_ratio'].to(device),
-        'targets': {k: v.to(device) for k, v in _b['targets'].items()},
+        'coords': _coords.unsqueeze(0).to(device),
+        't_src': _t_src.unsqueeze(0).to(device),
+        't_tgt': _t_tgt.unsqueeze(0).to(device),
+        't_cam': _t_cam.unsqueeze(0).to(device),
+        'targets': {k: v.unsqueeze(0).to(device) for k, v in _targets.items()},
     })
-    if _i == 0:
-        video_for_eval = _b['video'].to(device)         # (1, T, H, W, 3)
-        depth_for_eval = _s['depth']                      # (T, H, W) cpu
-        video_for_viz = _s['video']                       # (T, H, W, 3) cpu
 print(f'Done in {time.time() - t0_pool:.1f}s  ({len(query_pool)} batches, '
-      f'~{sum(qb["coords"].shape[0] for qb in query_pool):,} total queries)')
+      f'~{sum(qb["coords"].shape[1] for qb in query_pool):,} total queries)')
 
 # Storage for logging
 loss_log = {k: [] for k in ['loss', 'loss_3d', 'loss_2d', 'loss_vis', 'loss_disp', 'loss_normal', 'loss_conf']}
@@ -560,11 +616,11 @@ for step in range(CFG['train_steps'] + 1):
     if step == CFG['train_steps']:
         break  # last snapshot captured, done
 
-    # Pick a query batch from the pool (each has different video frames + query positions)
+    # Pick a query batch from the pool (same video, different query positions each step)
     qb = query_pool[step % len(query_pool)]
 
-    # Forward
-    preds = model(qb['video_input'], qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], qb['ar'])
+    # Forward — shared video_input/ar_d, diverse queries from pool
+    preds = model(video_input, qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], ar_d)
     all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
