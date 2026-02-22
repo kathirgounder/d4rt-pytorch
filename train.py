@@ -28,6 +28,7 @@ from datetime import datetime
 import yaml
 import json
 import math
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -419,16 +420,6 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, scal
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
     return checkpoint.get('step', 0), checkpoint.get('epoch', 0)
-
-
-def nullcontext():
-    """Context manager that does nothing (for Python < 3.7 compatibility)."""
-    class NullContext:
-        def __enter__(self):
-            return None
-        def __exit__(self, *args):
-            pass
-    return NullContext()
 
 
 def get_grad_norm(model):

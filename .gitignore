@@ -123,6 +123,7 @@ wandb/
 
 # Data directories
 data/
+data_samples/
 datasets/
 *.tar.gz
 *.tar
