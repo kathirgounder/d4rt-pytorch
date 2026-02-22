@@ -624,6 +624,11 @@ for step in range(CFG['train_steps'] + 1):
     all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
+    # Skip NaN losses (can happen early when predictions are unstable)
+    if torch.isnan(loss) or torch.isinf(loss):
+        scheduler.step()
+        continue
+
     # Backward
     optimizer.zero_grad()
     loss.backward()

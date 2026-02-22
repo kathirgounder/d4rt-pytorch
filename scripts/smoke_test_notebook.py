@@ -283,6 +283,10 @@ for step in range(CFG['train_steps'] + 1):
     all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
+    if torch.isnan(loss) or torch.isinf(loss):
+        scheduler.step()
+        continue
+
     optimizer.zero_grad()
     loss.backward()
     clip_grad_norm_(model.parameters(), CFG['grad_clip'])

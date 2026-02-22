@@ -20,8 +20,12 @@ def normalize_points(points: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     mean_depth = points[..., 2].mean(dim=-1, keepdim=True)  # (B, 1)
     mean_depth = mean_depth.unsqueeze(-1)  # (B, 1, 1)
 
+    # Clamp to prevent division by near-zero (can happen early in training
+    # when predicted Z values average near zero with diverse queries)
+    mean_depth = mean_depth.abs().clamp(min=0.1)
+
     # Normalize by mean depth
-    return points / (mean_depth + eps)
+    return points / mean_depth
 
 
 def log_transform(x: torch.Tensor) -> torch.Tensor:
