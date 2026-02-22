@@ -171,83 +171,85 @@ losses = criterion(outputs, targets_b)
 for k in ['loss_3d', 'loss_2d', 'loss_vis', 'loss_disp', 'loss_normal', 'loss_conf', 'loss']:
     print(f"  {k:13s}: {losses[k].item():.4f}")
 
-# --- Cell 16-17: Training loop with query pool (5 steps) ---
-print("\n=== Loading & processing sequence (cached) ===")
+# --- Cell 16-17: Training loop with multi-sequence query pool (5 steps) ---
+print("\n=== Loading & processing sequences (cached) ===")
 from torch.nn.utils import clip_grad_norm_
 
-# Load & process sequence ONCE (replicating __getitem__ pipeline)
-_raw = po_ds._load_sequence(0)
-_video = torch.from_numpy(_raw['video']).float()
-_orig_h, _orig_w = _raw['original_size']
+def _load_and_process_sequence(dataset, seq_idx):
+    """Load one sequence, subsample frames, resize, scale intrinsics/tracks."""
+    raw = dataset._load_sequence(seq_idx)
+    v = torch.from_numpy(raw['video']).float()
+    oh, ow = raw['original_size']
+    d = torch.from_numpy(raw['depth']).float() if raw.get('depth') is not None else None
+    n = torch.from_numpy(raw['normals']).float() if raw.get('normals') is not None else None
+    K = torch.from_numpy(raw['intrinsics']).float() if raw.get('intrinsics') is not None else None
+    E = torch.from_numpy(raw['extrinsics']).float() if raw.get('extrinsics') is not None else None
+    t3 = torch.from_numpy(raw['tracks_3d']).float() if raw.get('tracks_3d') is not None else None
+    t2 = torch.from_numpy(raw['tracks_2d']).float() if raw.get('tracks_2d') is not None else None
+    vis = torch.from_numpy(raw['visibility']).float() if raw.get('visibility') is not None else None
+    fi = dataset.temporal_sampler(v.shape[0], dataset.num_frames)
+    v = v[fi]
+    if d is not None: d = d[fi]
+    if n is not None: n = n[fi]
+    if E is not None: E = E[fi]
+    if K is not None and K.dim() == 3: K = K[fi]
+    if t3 is not None: t3 = t3[:, fi]
+    if t2 is not None: t2 = t2[:, fi]
+    if vis is not None: vis = vis[:, fi]
+    if v.max() > 1.0: v = v / 255.0
+    v, d, n = dataset._resize_frames(v, d, n)
+    H, W = dataset.img_size, dataset.img_size
+    T = v.shape[0]
+    if K is not None:
+        sx, sy = W / ow, H / oh
+        K = K.clone()
+        if K.dim() == 2:
+            K[0, 0] *= sx; K[0, 2] *= sx; K[1, 1] *= sy; K[1, 2] *= sy
+        else:
+            K[:, 0, 0] *= sx; K[:, 0, 2] *= sx; K[:, 1, 1] *= sy; K[:, 1, 2] *= sy
+    if t2 is not None:
+        t2 = t2.clone(); t2[..., 0] *= (W / ow); t2[..., 1] *= (H / oh)
+    ar = torch.tensor([ow / max(ow, oh), oh / max(ow, oh)], dtype=torch.float32)
+    return {
+        'video': v, 'depth': d, 'normals': n, 'intrinsics': K, 'extrinsics': E,
+        'tracks_3d': t3, 'tracks_2d': t2, 'visibility': vis,
+        'ar': ar, 'T': T, 'H': H, 'W': W,
+    }
 
-_depth = torch.from_numpy(_raw['depth']).float() if _raw.get('depth') is not None else None
-_normals = torch.from_numpy(_raw['normals']).float() if _raw.get('normals') is not None else None
-_intrinsics = torch.from_numpy(_raw['intrinsics']).float() if _raw.get('intrinsics') is not None else None
-_extrinsics = torch.from_numpy(_raw['extrinsics']).float() if _raw.get('extrinsics') is not None else None
-_tracks_3d = torch.from_numpy(_raw['tracks_3d']).float() if _raw.get('tracks_3d') is not None else None
-_tracks_2d = torch.from_numpy(_raw['tracks_2d']).float() if _raw.get('tracks_2d') is not None else None
-_visibility = torch.from_numpy(_raw['visibility']).float() if _raw.get('visibility') is not None else None
+n_seqs = min(len(po_ds), 1)  # limit to 1 sequence for smoke test (saves RAM)
+seq_data = []
+seq_video_inputs = []
+seq_ars = []
+for si in range(n_seqs):
+    sd = _load_and_process_sequence(po_ds, si)
+    seq_data.append(sd)
+    seq_video_inputs.append(sd['video'].unsqueeze(0).permute(0, 4, 1, 2, 3).to(device))
+    seq_ars.append(sd['ar'].unsqueeze(0).to(device))
+print(f"Loaded {n_seqs} sequences")
 
-# Temporal subsampling
-_frame_idx = po_ds.temporal_sampler(_video.shape[0], po_ds.num_frames)
-_video = _video[_frame_idx]
-if _depth is not None: _depth = _depth[_frame_idx]
-if _normals is not None: _normals = _normals[_frame_idx]
-if _extrinsics is not None: _extrinsics = _extrinsics[_frame_idx]
-if _intrinsics is not None and _intrinsics.dim() == 3: _intrinsics = _intrinsics[_frame_idx]
-if _tracks_3d is not None: _tracks_3d = _tracks_3d[:, _frame_idx]
-if _tracks_2d is not None: _tracks_2d = _tracks_2d[:, _frame_idx]
-if _visibility is not None: _visibility = _visibility[:, _frame_idx]
+video_for_eval = seq_data[0]['video'].unsqueeze(0).to(device)
+depth_for_eval = seq_data[0]['depth']
 
-# Normalize + resize
-if _video.max() > 1.0: _video = _video / 255.0
-_video, _depth, _normals = po_ds._resize_frames(_video, _depth, _normals)
-_H, _W = po_ds.img_size, po_ds.img_size
-_T = _video.shape[0]
-
-# Scale intrinsics
-if _intrinsics is not None:
-    _sx, _sy = _W / _orig_w, _H / _orig_h
-    _intrinsics = _intrinsics.clone()
-    if _intrinsics.dim() == 2:
-        _intrinsics[0, 0] *= _sx; _intrinsics[0, 2] *= _sx
-        _intrinsics[1, 1] *= _sy; _intrinsics[1, 2] *= _sy
-    else:
-        _intrinsics[:, 0, 0] *= _sx; _intrinsics[:, 0, 2] *= _sx
-        _intrinsics[:, 1, 1] *= _sy; _intrinsics[:, 1, 2] *= _sy
-
-# Scale 2D tracks
-if _tracks_2d is not None:
-    _tracks_2d = _tracks_2d.clone()
-    _tracks_2d[..., 0] *= (_W / _orig_w)
-    _tracks_2d[..., 1] *= (_H / _orig_h)
-
-# Aspect ratio
-_ar = torch.tensor([_orig_w / max(_orig_w, _orig_h), _orig_h / max(_orig_w, _orig_h)], dtype=torch.float32)
-
-# Shared tensors
-video_input = _video.unsqueeze(0).permute(0, 4, 1, 2, 3).to(device)
-ar_d = _ar.unsqueeze(0).to(device)
-video_for_eval = _video.unsqueeze(0).to(device)
-depth_for_eval = _depth
-
-# Generate query pool (fast — no disk I/O)
+# Generate query pool across all sequences
 print("=== Generating query pool ===")
 query_pool = []
 for _i in range(3):  # small pool for smoke test
+    _si = _i % n_seqs
+    _sd = seq_data[_si]
     _coords, _t_src, _t_tgt, _t_cam, _targets = po_ds.query_sampler.sample(
-        _T, _H, _W, depth=_depth, tracks_3d=_tracks_3d, tracks_2d=_tracks_2d,
-        visibility=_visibility, intrinsics=_intrinsics, extrinsics=_extrinsics,
-        normals=_normals,
+        _sd['T'], _sd['H'], _sd['W'], depth=_sd['depth'], tracks_3d=_sd['tracks_3d'],
+        tracks_2d=_sd['tracks_2d'], visibility=_sd['visibility'],
+        intrinsics=_sd['intrinsics'], extrinsics=_sd['extrinsics'], normals=_sd['normals'],
     )
     query_pool.append({
+        'seq_idx': _si,
         'coords': _coords.unsqueeze(0).to(device),
         't_src': _t_src.unsqueeze(0).to(device),
         't_tgt': _t_tgt.unsqueeze(0).to(device),
         't_cam': _t_cam.unsqueeze(0).to(device),
         'targets': {k: v.unsqueeze(0).to(device) for k, v in _targets.items()},
     })
-print(f"Query pool: {len(query_pool)} batches")
+print(f"Query pool: {len(query_pool)} batches across {n_seqs} sequences")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=CFG['lr'], weight_decay=CFG['weight_decay'])
 def lr_lambda(step):
@@ -279,7 +281,9 @@ for step in range(CFG['train_steps'] + 1):
         break
 
     qb = query_pool[step % len(query_pool)]
-    preds = model(video_input, qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], ar_d)
+    _vi = seq_video_inputs[qb['seq_idx']]
+    _ar = seq_ars[qb['seq_idx']]
+    preds = model(_vi, qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], _ar)
     all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
