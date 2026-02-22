@@ -171,9 +171,29 @@ losses = criterion(outputs, targets_b)
 for k in ['loss_3d', 'loss_2d', 'loss_vis', 'loss_disp', 'loss_normal', 'loss_conf', 'loss']:
     print(f"  {k:13s}: {losses[k].item():.4f}")
 
-# --- Cell 16-17: Training loop (5 steps) ---
-print("\n=== Training (5 steps) ===")
+# --- Cell 16-17: Training loop with query pool (5 steps) ---
+print("\n=== Pre-generating query pool ===")
 from torch.nn.utils import clip_grad_norm_
+
+query_pool = []
+video_for_eval = None
+depth_for_eval = None
+for _i in range(3):  # small pool for smoke test
+    _s = po_ds[0]
+    _b = collate_fn([_s])
+    query_pool.append({
+        'video_input': _b['video'].permute(0, 4, 1, 2, 3).to(device),
+        'coords': _b['coords'].to(device),
+        't_src': _b['t_src'].to(device),
+        't_tgt': _b['t_tgt'].to(device),
+        't_cam': _b['t_cam'].to(device),
+        'ar': _b['aspect_ratio'].to(device),
+        'targets': {k: v.to(device) for k, v in _b['targets'].items()},
+    })
+    if _i == 0:
+        video_for_eval = _b['video'].to(device)
+        depth_for_eval = _s['depth']
+print(f"Query pool: {len(query_pool)} batches")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=CFG['lr'], weight_decay=CFG['weight_decay'])
 def lr_lambda(step):
@@ -183,20 +203,13 @@ def lr_lambda(step):
     return max(CFG['min_lr'] / CFG['lr'], 0.5 * (1 + math.cos(math.pi * progress)))
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-video_input = video_b.permute(0, 4, 1, 2, 3).to(device)
-coords_d = batch['coords'].to(device)
-t_src_d = batch['t_src'].to(device)
-t_tgt_d = batch['t_tgt'].to(device)
-t_cam_d = batch['t_cam'].to(device)
-ar_d = batch['aspect_ratio'].to(device)
-video_eval = video_b.to(device)
-
 loss_log = {k: [] for k in ['loss', 'loss_3d', 'loss_2d', 'loss_vis', 'loss_disp', 'loss_normal', 'loss_conf']}
 depth_snapshots = {}
 snapshot_steps = sorted(set(s for s in CFG['snapshot_steps'] if s <= CFG['train_steps']))
 if CFG['train_steps'] not in snapshot_steps:
     snapshot_steps.append(CFG['train_steps'])
 
+print("\n=== Training (5 steps) ===")
 model.train()
 t0 = time.time()
 
@@ -204,15 +217,16 @@ for step in range(CFG['train_steps'] + 1):
     if step in snapshot_steps:
         model.eval()
         with torch.no_grad():
-            d_snap = model.predict_depth(video_eval, output_resolution=CFG['depth_viz_res'])
+            d_snap = model.predict_depth(video_for_eval, output_resolution=CFG['depth_viz_res'])
         depth_snapshots[step] = d_snap[0].cpu()
         model.train()
 
     if step == CFG['train_steps']:
         break
 
-    preds = model(video_input, coords_d, t_src_d, t_tgt_d, t_cam_d, ar_d)
-    all_losses = criterion(preds, targets_b)
+    qb = query_pool[step % len(query_pool)]
+    preds = model(qb['video_input'], qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], qb['ar'])
+    all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
     optimizer.zero_grad()
@@ -250,7 +264,7 @@ query_points = torch.from_numpy(query_pts_norm).float().unsqueeze(0).to(device)
 query_frames = torch.zeros(1, len(pick), dtype=torch.long, device=device)
 
 with torch.no_grad():
-    track_preds = model.predict_point_tracks(video_eval, query_points, query_frames)
+    track_preds = model.predict_point_tracks(video_for_eval, query_points, query_frames)
 
 pred_tracks_2d = track_preds['tracks_2d'][0].cpu()
 pred_tracks_3d = track_preds['tracks_3d'][0].cpu()
@@ -260,7 +274,7 @@ print(f"Tracks: {pred_tracks_2d.shape} 2D, {pred_tracks_3d.shape} 3D, {pred_vis.
 # --- Cell 26: Point cloud ---
 print("\n=== Point Cloud ===")
 with torch.no_grad():
-    pc = model.predict_point_cloud(video_eval, reference_frame=0, stride=4)
+    pc = model.predict_point_cloud(video_for_eval, reference_frame=0, stride=4)
 
 points = pc['points'][0].cpu()
 colors = pc['colors'][0].cpu()
@@ -274,7 +288,7 @@ depth_metric = DepthLoss(scale_invariant=True)
 final_depth = depth_snapshots[sorted(depth_snapshots.keys())[-1]]
 pred_d = final_depth.unsqueeze(0)
 gt_d_resized = F.interpolate(
-    depth.unsqueeze(1), size=CFG['depth_viz_res'], mode='nearest'
+    depth_for_eval.unsqueeze(1), size=CFG['depth_viz_res'], mode='nearest'
 ).squeeze(1).unsqueeze(0)
 
 for t_i in range(min(2, T)):

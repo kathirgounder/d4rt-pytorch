@@ -117,12 +117,15 @@ CFG = {
     'weight_decay': 0.01,
     'grad_clip': 10.0,
 
+    # Query diversity
+    'query_pool_size': 50,  # pre-generate this many diverse query batches
+
     # Visualization
     'snapshot_steps': [0, 50, 100, 200, 500, 1000],  # capture depth at these steps
     'depth_viz_res': (16, 16),  # resolution for depth prediction during training
 }
 
-# On A100, you can increase for better results:
+# On A100/L40S, you can increase for better results:
 # CFG['img_size'] = 128; CFG['train_steps'] = 3000; CFG['depth_viz_res'] = (32, 32)
 
 print('Configuration:')
@@ -501,16 +504,33 @@ def lr_lambda(step):
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-# Prepare batch on device
-video_input = video_b.permute(0, 4, 1, 2, 3).to(device)  # (1, C, T, H, W)
-coords_d = batch['coords'].to(device)
-t_src_d = batch['t_src'].to(device)
-t_tgt_d = batch['t_tgt'].to(device)
-t_cam_d = batch['t_cam'].to(device)
-ar_d = batch['aspect_ratio'].to(device)
-
-# For depth prediction snapshots
-video_eval = video_b.to(device)  # (1, T, H, W, 3)
+# Pre-generate diverse query batches.
+# Each call to po_ds[0] re-samples both temporal frames AND query positions,
+# so the model sees diverse (u,v) coordinates instead of memorizing a fixed set.
+print(f'Pre-generating {CFG["query_pool_size"]} diverse query batches...')
+query_pool = []
+video_for_eval = None
+depth_for_eval = None
+video_for_viz = None
+t0_pool = time.time()
+for _i in range(CFG['query_pool_size']):
+    _s = po_ds[0]
+    _b = collate_fn([_s])
+    query_pool.append({
+        'video_input': _b['video'].permute(0, 4, 1, 2, 3).to(device),
+        'coords': _b['coords'].to(device),
+        't_src': _b['t_src'].to(device),
+        't_tgt': _b['t_tgt'].to(device),
+        't_cam': _b['t_cam'].to(device),
+        'ar': _b['aspect_ratio'].to(device),
+        'targets': {k: v.to(device) for k, v in _b['targets'].items()},
+    })
+    if _i == 0:
+        video_for_eval = _b['video'].to(device)         # (1, T, H, W, 3)
+        depth_for_eval = _s['depth']                      # (T, H, W) cpu
+        video_for_viz = _s['video']                       # (T, H, W, 3) cpu
+print(f'Done in {time.time() - t0_pool:.1f}s  ({len(query_pool)} batches, '
+      f'~{sum(qb["coords"].shape[0] for qb in query_pool):,} total queries)')
 
 # Storage for logging
 loss_log = {k: [] for k in ['loss', 'loss_3d', 'loss_2d', 'loss_vis', 'loss_disp', 'loss_normal', 'loss_conf']}
@@ -533,16 +553,19 @@ for step in range(CFG['train_steps'] + 1):
     if step in snapshot_steps:
         model.eval()
         with torch.no_grad():
-            d_snap = model.predict_depth(video_eval, output_resolution=CFG['depth_viz_res'])
+            d_snap = model.predict_depth(video_for_eval, output_resolution=CFG['depth_viz_res'])
         depth_snapshots[step] = d_snap[0].cpu()
         model.train()
 
     if step == CFG['train_steps']:
         break  # last snapshot captured, done
 
+    # Pick a query batch from the pool (each has different video frames + query positions)
+    qb = query_pool[step % len(query_pool)]
+
     # Forward
-    preds = model(video_input, coords_d, t_src_d, t_tgt_d, t_cam_d, ar_d)
-    all_losses = criterion(preds, targets_b)
+    preds = model(qb['video_input'], qb['coords'], qb['t_src'], qb['t_tgt'], qb['t_cam'], qb['ar'])
+    all_losses = criterion(preds, qb['targets'])
     loss = all_losses['loss']
 
     # Backward
@@ -616,7 +639,9 @@ For depth queries: `t_src = t_tgt = t_cam = t`, and we extract the Z component o
 
 code("""\
 # Depth evolution grid: rows = training steps, columns = video frames
-gt_depth = depth.numpy()  # (T, H, W)
+# Use the evaluation clip (first batch's video/depth) for visualization
+gt_depth = depth_for_eval.numpy()  # (T, H, W)
+T = video_for_viz.shape[0]
 
 n_snapshots = len(depth_snapshots)
 n_frames = min(T, 8)
@@ -652,7 +677,7 @@ final_depth = depth_snapshots[final_step]  # (T, res_h, res_w)
 
 fig, axes = plt.subplots(3, n_frames, figsize=(2.8 * n_frames, 7))
 for j, fi in enumerate(frame_idx):
-    axes[0, j].imshow(video[fi].clamp(0, 1).numpy())
+    axes[0, j].imshow(video_for_viz[fi].clamp(0, 1).numpy())
     axes[0, j].set_title(f'Frame {fi}', fontsize=9)
     axes[0, j].axis('off')
     axes[1, j].imshow(gt_depth[fi], cmap='plasma')
@@ -671,7 +696,7 @@ from losses.losses import DepthLoss
 depth_metric = DepthLoss(scale_invariant=True)
 pred_d = final_depth.unsqueeze(0)
 gt_d_resized = F.interpolate(
-    depth.unsqueeze(1), size=CFG['depth_viz_res'], mode='nearest'
+    depth_for_eval.unsqueeze(1), size=CFG['depth_viz_res'], mode='nearest'
 ).squeeze(1).unsqueeze(0)  # (1, T, res_h, res_w)
 
 # Average metrics across frames
@@ -722,7 +747,7 @@ query_frames = torch.zeros(1, len(pick), dtype=torch.long, device=device)  # all
 
 # Predict tracks
 with torch.no_grad():
-    track_preds = model.predict_point_tracks(video_eval, query_points, query_frames)
+    track_preds = model.predict_point_tracks(video_for_eval, query_points, query_frames)
 
 pred_tracks_2d = track_preds['tracks_2d'][0].cpu()  # (N, T, 2) normalized
 pred_tracks_3d = track_preds['tracks_3d'][0].cpu()  # (N, T, 3)
@@ -731,7 +756,7 @@ pred_vis = track_preds['visibility'][0].cpu()         # (N, T)
 print(f'Predicted {pred_tracks_2d.shape[0]} tracks across {pred_tracks_2d.shape[1]} frames')
 
 # Visualize predicted 2D tracks
-fig = visualize_tracks(video.cpu(), pred_tracks_2d, pred_vis, num_tracks=n_track_queries)
+fig = visualize_tracks(video_for_viz.cpu(), pred_tracks_2d, pred_vis, num_tracks=n_track_queries)
 fig.suptitle('Predicted 2D Point Tracks (overlaid on video frames)', fontsize=14)
 plt.tight_layout()
 plt.show()""")
@@ -789,7 +814,7 @@ code("""\
 from utils.visualization import visualize_point_cloud
 
 with torch.no_grad():
-    pc = model.predict_point_cloud(video_eval, reference_frame=0, stride=2)
+    pc = model.predict_point_cloud(video_for_eval, reference_frame=0, stride=2)
 
 points = pc['points'][0].cpu()   # (T*H*W, 3)
 colors = pc['colors'][0].cpu()   # (T*H*W, 3)
@@ -865,7 +890,7 @@ try:
 
     def animate(t):
         ax1.clear(); ax2.clear()
-        ax1.imshow(video[t].clamp(0, 1).numpy())
+        ax1.imshow(video_for_viz[t].clamp(0, 1).numpy())
         ax1.set_title(f'RGB (frame {t})')
         ax1.axis('off')
         ax2.imshow(final_depth_anim[t].numpy(), cmap='plasma')
