@@ -61,7 +61,14 @@ for _ in range(5):
         break
     _project_root = _project_root.parent
 os.chdir(str(_project_root))
+# Ensure our project is first on sys.path and clear any cached 'data' module
+# (some environments have a system-level 'data' package that shadows ours)
+if str(_project_root) in sys.path:
+    sys.path.remove(str(_project_root))
 sys.path.insert(0, str(_project_root))
+for _mod in list(sys.modules):
+    if _mod == 'data' or _mod.startswith('data.'):
+        del sys.modules[_mod]
 print(f'Project root: {_project_root}')
 
 import torch
